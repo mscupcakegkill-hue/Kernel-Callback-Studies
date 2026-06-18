@@ -8,6 +8,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 
+// Device path — must match kernel driver's symbolic link
 const DEVICE_PATH: &[u16] = &[
     '\\' as u16, '\\' as u16, '.' as u16, '\\' as u16,
     'D' as u16, 'A' as u16, 'S' as u16, 'H' as u16,
@@ -15,10 +16,11 @@ const DEVICE_PATH: &[u16] = &[
     'e' as u16, 'r' as u16, 0u16,
 ];
 
-const IOCTL_ADD_BLACKLIST: u32    = 0x800;
-const IOCTL_REMOVE_BLACKLIST: u32 = 0x801;
-const IOCTL_CLEAR_BLACKLIST: u32  = 0x802;
-const IOCTL_LIST_BLACKLIST: u32   = 0x803;
+// IOCTL codes — must match kernel driver definitions
+const IOCTL_ADD_BLACKLIST: u32       = 0x800;
+const IOCTL_REMOVE_BLACKLIST: u32    = 0x801;
+const IOCTL_CLEAR_BLACKLIST: u32     = 0x802;
+const IOCTL_LIST_BLACKLIST: u32      = 0x803;
 const IOCTL_GET_BLACKLIST_COUNT: u32 = 0x804;
 
 fn open_device() -> Option<HANDLE> {
@@ -160,63 +162,86 @@ fn print_help() {
 }
 
 fn main() {
-    println!("[DASH] Opening device..");
+    println!("[DASH] Opening device...");
+
     let handle = match open_device() {
-        Some(h) => h,
+        Some(h) => {
+            println!("[DASH] Connected to driver!");
+            h
+        }
         None => {
-            println!("[!] Failed to open device. Is the driver loaded?");
+            eprintln!("[DASH] ERROR: Cannot open device. Is driver loaded?");
             return;
         }
     };
 
     print_help();
 
-    let mut input = String::new();
     loop {
         print!("> ");
         io::stdout().flush().unwrap();
-        input.clear();
-        io::stdin().read_line(&mut input).unwrap();
-        let parts: Vec<&str> = input.trim().split_whitespace().collect();
 
-        if parts.is_empty() { continue; }
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_err() {
+            break;
+        }
+
+        let parts: Vec<&str> = input.trim().splitn(2, ' ').collect();
 
         match parts[0] {
             "add" => {
-                if parts.len() > 1 {
+                if parts.len() < 2 {
+                    println!("Usage: add <process.exe>");
+                } else {
                     if add_blacklist(handle, parts[1]) {
                         println!("[+] Added: {}", parts[1]);
                     } else {
-                        println!("[!] Failed to add.");
+                        println!("[-] Failed to add (duplicate or list full?)");
                     }
                 }
             }
+
             "remove" => {
-                if parts.len() > 1 {
+                if parts.len() < 2 {
+                    println!("Usage: remove <process.exe>");
+                } else {
                     if remove_blacklist(handle, parts[1]) {
-                        println!("[+] Removed: {}", parts[1]);
+                        println!("[-] Removed: {}", parts[1]);
                     } else {
-                        println!("[!] Failed to remove.");
+                        println!("[-] Not found in blacklist");
                     }
                 }
             }
+
             "clear" => {
                 if clear_blacklist(handle) {
-                    println!("[+] Blacklist cleared.");
+                    println!("[*] Blacklist cleared!");
+                } else {
+                    println!("[-] Failed to clear");
                 }
             }
+
             "list" => {
-                println!("[*] Current Blacklist:");
+                let count = get_count(handle);
+                println!("[*] Blacklist ({} entries):", count);
                 list_blacklist(handle);
             }
+
             "count" => {
-                println!("[*] Count: {}", get_count(handle));
+                let count = get_count(handle);
+                println!("[*] Blacklist count: {}", count);
             }
+
             "help" => print_help(),
+
             "exit" => break,
-            _ => println!("[?] Unknown command."),
+
+            "" => {}
+
+            _ => println!("Unknown command. Type 'help' for commands."),
         }
     }
 
     unsafe { CloseHandle(handle); }
+    println!("[DASH] Disconnected.");
 }
