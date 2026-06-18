@@ -1,0 +1,9 @@
+[target.x86_64-pc-windows-msvc]
+linker = "link.exe"
+rustflags = [
+    "-C", "link-arg=/ENTRY:DriverEntry",
+    "-C", "link-arg=/SUBSYSTEM:NATIVE",
+    "-C", "link-arg=/DRIVER",
+    "-C", "link-arg=/NODEFAULTLIB",
+    "-C", "link-arg=/MANIFEST:NO",
+]
