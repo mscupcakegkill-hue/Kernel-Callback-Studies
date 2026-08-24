@@ -15,6 +15,7 @@ This project is an experimental implementation of Windows Kernel-mode callbacks 
 - **`dash_driver/`**: 🧠 The core Kernel-mode driver.
 - **`dash_cli/`**: 🎮 User-mode Command Line Interface to control the driver.
 - **`spectre_rootkit/`**: 💀 Experimental stealth/rootkit study module (DKOM, anti-debug, anti-AV) — research only.
+- **`spectre_cli/`**: 🕹️ User-mode CLI to control the SPECTRE module (hide/unhide/kill processes, check debugger, kill AV).
 
 ## 🛠️ How to Use
 1. **Build the Driver**: Navigate to `dash_driver/` and build using `cargo build --release`.

