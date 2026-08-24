@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![allow(static_mut_refs)] // kernel driver: shared static state is intentional
 
 use core::panic::PanicInfo;
 use core::ffi::c_char;
@@ -30,7 +31,8 @@ const MAX_NAME_LENGTH: usize       = 256;
 // ============================================================
 // UTF-16 Device / Symlink Names
 // ============================================================
-const DEVICE_NAME_UTF16: [u16; 20] = [
+// "\Device\DASHDriver" = 18 chars + null terminator = 19
+const DEVICE_NAME_UTF16: [u16; 19] = [
     0x005C, 0x0044, 0x0065, 0x0076, 0x0069, 0x0063, 0x0065, // \Device
     0x005C,                                                   // \
     0x0044, 0x0041, 0x0053, 0x0048,                           // DASH
@@ -38,7 +40,8 @@ const DEVICE_NAME_UTF16: [u16; 20] = [
     0x0000,                                                   // null
 ];
 
-const SYMLINK_NAME_UTF16: [u16; 24] = [
+// "\DosDevices\DASHDriver" = 22 chars + null terminator = 23
+const SYMLINK_NAME_UTF16: [u16; 23] = [
     0x005C, 0x0044, 0x006F, 0x0073,                           // \Dos
     0x0044, 0x0065, 0x0076, 0x0069, 0x0063, 0x0065, 0x0073,   // Devices
     0x005C,                                                   // \
@@ -359,7 +362,9 @@ unsafe extern "system" fn device_control_handler(
             let input_buffer = (*irp).AssociatedIrp.SystemBuffer as *mut u8;
             let input_length = (*irp_stack).Parameters.DeviceIoControl.InputBufferLength;
 
-            if !input_buffer.is_null() && input_length > 0 {
+            // FIXED: bound-check input length like the ADD handler to avoid
+            // writing past the end of the SystemBuffer (kernel pool corruption).
+            if !input_buffer.is_null() && input_length > 0 && input_length <= MAX_NAME_LENGTH as u32 {
                 *input_buffer.add((input_length - 1) as usize) = 0;
 
                 if remove_from_blacklist(input_buffer) {

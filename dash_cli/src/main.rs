@@ -187,14 +187,16 @@ fn main() {
         }
 
         let parts: Vec<&str> = input.trim().splitn(2, ' ').collect();
+        // Trim the argument (avoids trailing-space mismatch with the driver)
+        let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
 
         match parts[0] {
             "add" => {
-                if parts.len() < 2 {
+                if arg.is_empty() {
                     println!("Usage: add <process.exe>");
                 } else {
-                    if add_blacklist(handle, parts[1]) {
-                        println!("[+] Added: {}", parts[1]);
+                    if add_blacklist(handle, arg) {
+                        println!("[+] Added: {}", arg);
                     } else {
                         println!("[-] Failed to add (duplicate or list full?)");
                     }
@@ -202,11 +204,11 @@ fn main() {
             }
 
             "remove" => {
-                if parts.len() < 2 {
+                if arg.is_empty() {
                     println!("Usage: remove <process.exe>");
                 } else {
-                    if remove_blacklist(handle, parts[1]) {
-                        println!("[-] Removed: {}", parts[1]);
+                    if remove_blacklist(handle, arg) {
+                        println!("[-] Removed: {}", arg);
                     } else {
                         println!("[-] Not found in blacklist");
                     }
