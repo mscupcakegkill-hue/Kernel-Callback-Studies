@@ -1,6 +1,8 @@
 use std::io::{self, Write};
 use std::ptr;
 use std::mem;
+use std::thread;
+use std::time::Duration;
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
@@ -161,7 +163,96 @@ fn print_help() {
     println!("  exit                  — Quit");
 }
 
+// ============================================================
+// DEMO MODE: simulated driver responses for showcase/screenshot.
+// Run with: dash_cli.exe --demo
+// ============================================================
+fn run_demo() {
+    println!();
+    println!("============================================================");
+    println!("  DASH KERNEL PROCESS BLOCKER — DEMO MODE (simulated)");
+    println!("  Showing the full CLI flow without a live kernel driver.");
+    println!("============================================================");
+    println!();
+
+    fn type_line(s: &str) {
+        print!("> ");
+        io::stdout().flush().unwrap();
+        for chunk in s.as_bytes().chunks(2) {
+            print!("{}", String::from_utf8_lossy(chunk));
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_millis(40));
+        }
+        println!();
+    }
+
+    fn ok(msg: &str) {
+        thread::sleep(Duration::from_millis(250));
+        println!("{}", msg);
+    }
+
+    // --- Scene 1: blacklist a process ---
+    type_line("add notepad.exe");
+    println!("[*] Sending IOCTL_ADD_BLACKLIST (0x800) -> \\\\.\\DASHDriver");
+    println!("[*] kernel: copied 'notepad.exe' into blacklist slot #1");
+    ok("[+] Added: notepad.exe");
+
+    // --- Scene 2: add more targets ---
+    type_line("add cmd.exe");
+    println!("[*] Sending IOCTL_ADD_BLACKLIST (0x800) -> \\\\.\\DASHDriver");
+    println!("[*] kernel: copied 'cmd.exe' into blacklist slot #2");
+    ok("[+] Added: cmd.exe");
+
+    type_line("add powershell.exe");
+    println!("[*] Sending IOCTL_ADD_BLACKLIST (0x800) -> \\\\.\\DASHDriver");
+    println!("[*] kernel: copied 'powershell.exe' into blacklist slot #3");
+    ok("[+] Added: powershell.exe");
+
+    // --- Scene 3: list + count ---
+    type_line("count");
+    println!("[*] Sending IOCTL_GET_BLACKLIST_COUNT (0x804) -> \\\\.\\DASHDriver");
+    ok("[*] Blacklist count: 3");
+
+    type_line("list");
+    println!("[*] Sending IOCTL_LIST_BLACKLIST (0x803) -> \\\\.\\DASHDriver");
+    println!("[*] kernel: 3 entries returned");
+    ok("  - notepad.exe");
+    ok("  - cmd.exe");
+    ok("  - powershell.exe");
+
+    // --- Scene 4: kernel auto-kill on process creation ---
+    type_line("add malware.exe");
+    println!("[*] Sending IOCTL_ADD_BLACKLIST (0x800) -> \\\\.\\DASHDriver");
+    println!("[*] kernel: copied 'malware.exe' into blacklist slot #4");
+    ok("[+] Added: malware.exe");
+    println!();
+    println!("[DASH KERNEL] New Process: malware.exe (PID: 0x1A2B)");
+    println!("[DASH KERNEL] BLOCKED: malware.exe - TERMINATING!");
+    println!("[DASH KERNEL] Terminated: malware.exe (PID: 0x1A2B)");
+    println!();
+
+    // --- Scene 5: remove ---
+    type_line("remove notepad.exe");
+    println!("[*] Sending IOCTL_REMOVE_BLACKLIST (0x801) -> \\\\.\\DASHDriver");
+    println!("[*] kernel: removed slot #1, shifted remaining entries");
+    ok("[-] Removed: notepad.exe");
+
+    println!();
+    println!("============================================================");
+    println!("  DEMO COMPLETE — this was a SIMULATION.");
+    println!("  For real kernel operation: build with WDK, load the .sys");
+    println!("  driver in a test VM, then run: dash_cli.exe");
+    println!("============================================================");
+    println!();
+}
+
 fn main() {
+    // DEMO MODE: --demo runs a simulated showcase (no kernel driver needed).
+    if std::env::args().any(|a| a == "--demo" || a == "-d") {
+        run_demo();
+        return;
+    }
+
     println!("[DASH] Opening device...");
 
     let handle = match open_device() {

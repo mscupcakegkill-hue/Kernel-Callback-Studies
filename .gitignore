@@ -1,0 +1,8 @@
+# Rust build artifacts
+target/
+**/target/
+
+# Cargo lockfiles for crates (binaries usually commit them, but this repo
+# never did — keep the tree clean)
+Cargo.lock
+**/Cargo.lock
