@@ -271,7 +271,7 @@ unsafe extern "system" fn process_callback(
     }
 
     // --- Blacklisted target detected ---
-    let warn = b"[DASH] BLOCKED: %s — TERMINATING!\n\0";
+    let warn = b"[DASH] BLOCKED: %s - TERMINATING!\n\0";
     DbgPrint(warn.as_ptr() as *const c_char, name_ptr);
 
     // --- Build CLIENT_ID for ZwOpenProcess ---
@@ -529,7 +529,7 @@ pub extern "system" fn DriverEntry(
         let cb_status = PsSetCreateProcessNotifyRoutine(Some(process_callback), 0);
 
         if cb_status == STATUS_SUCCESS {
-            let msg = b"[DASH] Driver Loaded — IOCTL + Kill Mode Active\n\0";
+            let msg = b"[DASH] Driver Loaded - IOCTL + Kill Mode Active\n\0";
             DbgPrint(msg.as_ptr() as *const c_char);
         }
 

